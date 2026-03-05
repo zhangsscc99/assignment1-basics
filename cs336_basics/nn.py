@@ -1,4 +1,5 @@
-# NN building blocks: Linear, Embedding, RMSNorm, SiLU, softmax, cross_entropy, gradient clipping.
+# NN 基础模块：Linear, Embedding, RMSNorm, SiLU, softmax, cross_entropy, gradient_clipping.
+# 对应文档: docs/nn.md
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -9,6 +10,7 @@ from torch import Tensor
 
 
 def softmax(x: Tensor, dim: int) -> Tensor:
+    """沿 dim 做 softmax；先减该维最大值再 exp，数值稳定。"""
     x_max = x.max(dim=dim, keepdim=True).values
     x = x - x_max
     exp_x = torch.exp(x)
@@ -16,17 +18,17 @@ def softmax(x: Tensor, dim: int) -> Tensor:
 
 
 def cross_entropy(inputs: Tensor, targets: Tensor) -> Tensor:
-    # inputs: (..., vocab_size), targets: (...)
+    """平均交叉熵：inputs (..., vocab_size)，targets (...) 为类别 id；先 log_softmax 再 gather 取负。"""
     dim = -1
     x = inputs - inputs.max(dim=dim, keepdim=True).values
     log_sum_exp = torch.log(torch.exp(x).sum(dim=dim, keepdim=True) + 1e-12)
     log_prob = inputs - log_sum_exp
-    # nll: -log_prob[target]
     nll = -torch.gather(log_prob, dim, targets.unsqueeze(dim)).squeeze(dim)
     return nll.mean()
 
 
 def gradient_clipping(parameters: Iterable[nn.Parameter], max_l2_norm: float, eps: float = 1e-6) -> None:
+    """将所有参数的梯度视为一个向量，若 L2 范数 > max_l2_norm 则整体缩放（原地修改 grad）。"""
     params = list(parameters)
     total_norm_sq = sum(p.grad.data.pow(2).sum().item() for p in params if p.grad is not None)
     total_norm = total_norm_sq ** 0.5
@@ -38,6 +40,8 @@ def gradient_clipping(parameters: Iterable[nn.Parameter], max_l2_norm: float, ep
 
 
 class Linear(nn.Module):
+    """无 bias 线性层：y = x @ weight.T，weight 形状 (out_features, in_features)。"""
+
     def __init__(
         self,
         in_features: int,
@@ -56,6 +60,8 @@ class Linear(nn.Module):
 
 
 class Embedding(nn.Module):
+    """词嵌入：token_ids 索引 weight，得到 (..., embedding_dim)。weight 形状 (num_embeddings, embedding_dim)。"""
+
     def __init__(
         self,
         num_embeddings: int,
@@ -72,6 +78,8 @@ class Embedding(nn.Module):
 
 
 class RMSNorm(nn.Module):
+    """RMSNorm：对最后一维 x 做 x / sqrt(mean(x^2)+eps) * weight；先转 float32 再算，避免溢出。"""
+
     def __init__(
         self,
         d_model: int,
@@ -92,4 +100,5 @@ class RMSNorm(nn.Module):
 
 
 def silu(x: Tensor) -> Tensor:
+    """SiLU (Swish): x * sigmoid(x)。"""
     return x * torch.sigmoid(x)

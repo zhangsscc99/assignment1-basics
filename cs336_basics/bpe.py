@@ -1,4 +1,5 @@
 # Byte-pair encoding: training and tokenizer (encode/decode).
+# 对应文档: docs/bpe.md
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from typing import Any, Iterable, Iterator
 
 import regex as re_module
 
+# GPT-2 风格预分词：按单词/数字/标点等切分，不在整句上直接合并字节对
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
@@ -25,21 +27,21 @@ def train_bpe(
     path = Path(input_path)
     corpus = path.read_text(encoding="utf-8", errors="replace")
 
-    # Split on special tokens so we never merge across them.
+    # 按特殊 token 切分，避免跨文档合并（例如 <|endoftext|> 分隔的文档之间不合并）
     if special_tokens:
         pattern = "|".join(re.escape(s) for s in special_tokens)
         segments = re.split(pattern, corpus)
     else:
         segments = [corpus]
 
-    # Pre-tokenize each segment and get word -> count. Each word is tuple of byte values (0-255).
+    # 预分词：每段用正则切出“词”，每个词转成 UTF-8 字节元组并统计出现次数
     word_counts: Counter[tuple[int, ...]] = Counter()
     for seg in segments:
         for m in re_module.finditer(PAT, seg):
             token = m.group(0)
             word_counts[tuple(token.encode("utf-8"))] += 1
 
-    # Initial vocab: special tokens then bytes 0..255. id -> bytes.
+    # 初始词表：先放特殊 token，再放 256 个单字节；id -> bytes
     vocab: dict[int, bytes] = {}
     next_id = 0
     for s in special_tokens:
@@ -49,10 +51,10 @@ def train_bpe(
     for b in range(256):
         vocab[next_id] = bytes([b])
         next_id += 1
-    # Byte b has id = num_special + b
+    # 字节 b 的 id = num_special + b
     byte_to_id = {b: num_special + b for b in range(256)}
 
-    # Represent each word as tuple of token ids.
+    # 把每个“词”表示成当前词表下的 id 元组，便于后续统计相邻对
     id_word_counts: Counter[tuple[int, ...]] = Counter()
     for word_bytes, count in word_counts.items():
         ids = tuple(byte_to_id[b] for b in word_bytes)
@@ -62,7 +64,7 @@ def train_bpe(
     merges: list[tuple[bytes, bytes]] = []
 
     while len(vocab) < vocab_size:
-        # Count pairs (consecutive ids in all words).
+        # 统计所有“相邻 id 对”的出现次数（按词加权）
         pair_counts: Counter[tuple[int, int]] = Counter()
         for word, count in id_word_counts.items():
             for i in range(len(word) - 1):
@@ -72,7 +74,7 @@ def train_bpe(
         if not pair_counts:
             break
 
-        # Best pair: max count, then lexicographically greater (by bytes).
+        # 选出现次数最多的对；次数相同则按 (left_bytes, right_bytes) 字典序取更大
         def key(item: tuple[tuple[int, int], int]) -> tuple[int, bytes, bytes]:
             (left_id, right_id), cnt = item
             left_bytes = vocab[left_id]
@@ -88,7 +90,7 @@ def train_bpe(
         next_id += 1
         vocab[new_id] = new_bytes
 
-        # Replace every (left_id, right_id) with new_id in all words.
+        # 在所有词中，把连续的 (left_id, right_id) 替换成 new_id，得到新的词表表示
         new_id_word_counts: Counter[tuple[int, ...]] = Counter()
         for word, count in id_word_counts.items():
             new_word = _replace_pair(word, left_id, right_id, new_id)
@@ -105,7 +107,7 @@ def _replace_pair(
     right_id: int,
     new_id: int,
 ) -> tuple[int, ...]:
-    """Replace all consecutive (left_id, right_id) in word with new_id."""
+    """将 word 中所有连续的 (left_id, right_id) 替换为 new_id，返回新 id 元组。"""
     if len(word) < 2:
         return word
     out: list[int] = []
@@ -121,7 +123,7 @@ def _replace_pair(
 
 
 class Tokenizer:
-    """BPE tokenizer with encode/decode and optional special tokens."""
+    """BPE 分词器：支持 encode/decode，以及可选的 special_tokens（编码时保持为单 token）。"""
 
     def __init__(
         self,
@@ -132,12 +134,12 @@ class Tokenizer:
         self._vocab = dict(vocab)
         self._merges = list(merges)
         self._special_tokens = list(special_tokens or [])
-        # bytes -> id (for decode). Prefer first id if duplicate.
+        # 反向映射：bytes -> id，用于编码时查 id；若有重复 bytes 只保留第一个 id
         self._bytes_to_id: dict[bytes, int] = {}
         for i, b in self._vocab.items():
             if b not in self._bytes_to_id:
                 self._bytes_to_id[b] = i
-        # Add special tokens to vocab if not present.
+        # 若 special_tokens 不在词表中，则追加到词表末尾
         for s in self._special_tokens:
             b = s.encode("utf-8")
             if b not in self._bytes_to_id:
@@ -157,11 +159,12 @@ class Tokenizer:
         return cls(vocab, merges, special_tokens)
 
     def encode(self, text: str) -> list[int]:
+        """文本 -> token id 列表。若设置了 special_tokens，会按它们切分并保留为单 token。"""
         if not text:
             return []
         if not self._special_tokens:
             return self._encode_segment(text)
-        # Split keeping delimiters: ["a", "<|endoftext|>", "b"]
+        # 按特殊 token 切分并保留分隔符：得到 [段1, 特殊1, 段2, ...]
         pattern = "|".join(re.escape(s) for s in self._special_tokens)
         parts = re.split("(" + pattern + ")", text)
         ids = []
@@ -175,6 +178,7 @@ class Tokenizer:
         return ids
 
     def _encode_segment(self, text: str) -> list[int]:
+        """对不含特殊 token 的一段文本编码：预分词后对每段应用 BPE merges。"""
         if not text:
             return []
         result: list[int] = []
@@ -184,10 +188,10 @@ class Tokenizer:
         return result
 
     def _bpe_encode_bytes(self, b: bytes) -> list[int]:
-        """Encode a single pre-token (bytes) to list of ids using merges."""
+        """对单个预分词单元（一段 bytes）应用 BPE：按 merges 顺序合并，再查 id。"""
         if not b:
             return []
-        # Start with single-byte tokens (ids).
+        # 初始为单字节列表，然后按 merges 顺序从左到右合并
         tokens: list[bytes] = [bytes([x]) for x in b]
         for left, right in self._merges:
             i = 0
@@ -199,11 +203,11 @@ class Tokenizer:
         return [self._bytes_to_id[t] for t in tokens]
 
     def encode_iterable(self, iterable: Iterator[str]) -> Iterator[int]:
-        """Lazily yield token ids from an iterable of strings (e.g. file line by line)."""
+        """流式编码：从字符串迭代器（如文件）逐块读入，按块/行产出 token id，适合大文件省内存。"""
         buffer = ""
         for chunk in iterable:
             buffer += chunk
-            # Split on special tokens and emit full segments; keep incomplete at boundary.
+            # 按 special_tokens 切分并输出完整段；边界未完整 token 留在 buffer
             if self._special_tokens:
                 pattern = "|".join(re.escape(s) for s in self._special_tokens)
                 parts = re.split("(" + pattern + ")", buffer)
@@ -234,14 +238,16 @@ class Tokenizer:
                 yield id_
 
     def decode(self, ids: list[int]) -> str:
+        """id 列表 -> 查词表拼成字节串 -> UTF-8 解码；非法字节用替换字符。"""
         b = b"".join(self._vocab.get(i, b"") for i in ids)
         return b.decode("utf-8", errors="replace")
 
 
 def _load_vocab_from_file(path: str | os.PathLike) -> dict[int, bytes]:
+    """从 JSON 加载词表。支持本仓库格式 {"0": [97,98], ...} 或 GPT-2 风格 {"token": id}。"""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    # Our format: {"0": [97, 98], "1": [99]} for id -> list of byte values.
+    # 本仓库格式：键为 id 字符串，值为字节列表
     vocab: dict[int, bytes] = {}
     for k, v in data.items():
         try:
@@ -256,13 +262,12 @@ def _load_vocab_from_file(path: str | os.PathLike) -> dict[int, bytes]:
             pass
     if vocab:
         return vocab
-    # GPT-2 style: keys are token strings (single char or <|endoftext|>), values are ids.
+    # GPT-2 风格：键为 token 字符串，值为 id
     for k, v in data.items():
         idx = int(v)
         if k == "<|endoftext|>" or len(k) > 1:
             vocab[idx] = k.encode("utf-8")
         else:
-            # Single char in GPT-2 byte repr; need byte decoder from tiktoken/gpt2.
             vocab[idx] = k.encode("utf-8")
     return vocab
 
@@ -271,6 +276,7 @@ def _load_merges_from_file(
     path: str | os.PathLike,
     vocab: dict[int, bytes] | None = None,
 ) -> list[tuple[bytes, bytes]]:
+    """从 merges 文件加载合并规则。支持本格式（逗号分隔的字节整数）或 GPT-2 风格字符串。"""
     merges = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -280,7 +286,7 @@ def _load_merges_from_file(
             parts = line.split(" ", 1)
             if len(parts) == 2:
                 a, b = parts
-                # Our format: "32,116 104,101" (comma-separated byte ints)
+                # 本仓库格式：每行 "left_byte0,left_byte1 right_byte0,right_byte1"
                 if "," in a or "," in b:
                     left = bytes(int(x) for x in a.split(","))
                     right = bytes(int(x) for x in b.split(","))

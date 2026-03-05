@@ -1,4 +1,5 @@
-# AdamW and LR schedule.
+# AdamW 与学习率调度（cosine + warmup）。
+# 对应文档: docs/optimizer.md
 from __future__ import annotations
 
 import math
@@ -15,6 +16,7 @@ def get_lr_cosine_schedule(
     warmup_iters: int,
     cosine_cycle_iters: int,
 ) -> float:
+    """Warmup 阶段线性增到 max，再 cosine 衰减到 min，超过 cycle 后保持 min。"""
     if it < warmup_iters:
         return max_learning_rate * (it / warmup_iters)
     if it > cosine_cycle_iters:
@@ -40,6 +42,7 @@ class AdamW(Optimizer):
         super().__init__(params, defaults)
 
     def step(self, closure: Callable | None = None):
+        """一步 AdamW：更新 m/v，用偏差修正后的步长更新参数，再做 weight decay。"""
         loss = None
         if closure is not None:
             loss = closure()

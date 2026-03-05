@@ -1,4 +1,5 @@
 # Scaled dot-product attention, RoPE, multi-head causal self-attention.
+# 对应文档: docs/attention.md
 from __future__ import annotations
 
 import math
@@ -17,7 +18,7 @@ def scaled_dot_product_attention(
     V: Tensor,
     mask: Tensor | None = None,
 ) -> Tensor:
-    # Q, K: (..., seq_q, d_k), V: (..., seq_k, d_v). mask: (..., seq_q, seq_k), True = attend.
+    """Attention(Q,K,V) = softmax(QK^T/sqrt(d_k)) V。mask 为 True 的位置可 attend，False 置 -inf。"""
     d_k = Q.size(-1)
     scale = d_k ** -0.5
     scores = einsum(Q, K, "... q d, ... k d -> ... q k") * scale
@@ -28,6 +29,8 @@ def scaled_dot_product_attention(
 
 
 class RotaryPositionalEmbedding(nn.Module):
+    """RoPE：对 Q/K 按位置施加旋转，使注意力只依赖相对位置。无可学习参数，cos/sin 预计算。"""
+
     def __init__(
         self,
         theta: float,
@@ -39,7 +42,7 @@ class RotaryPositionalEmbedding(nn.Module):
         self.theta = theta
         self.d_k = d_k
         self.max_seq_len = max_seq_len
-        # Precompute cos/sin for positions 0..max_seq_len-1. Shape (max_seq_len, d_k/2) each.
+        # 预计算 0..max_seq_len-1 的 cos/sin，形状 (max_seq_len, d_k/2)
         inv_freq = 1.0 / (theta ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
         pos = torch.arange(max_seq_len, device=device, dtype=torch.float32)
         freqs = pos.unsqueeze(1) * inv_freq.unsqueeze(0)
@@ -47,8 +50,8 @@ class RotaryPositionalEmbedding(nn.Module):
         self.register_buffer("sin_cached", freqs.sin(), persistent=False)
 
     def forward(self, x: Tensor, token_positions: Tensor) -> Tensor:
-        # x: (..., seq_len, d_k), token_positions: (..., seq_len)
-        cos = self.cos_cached[token_positions]  # (..., seq_len, d_k/2)
+        """对 x 的每对维度 (x[...,2k], x[...,2k+1]) 按 token_positions 对应角度旋转。"""
+        cos = self.cos_cached[token_positions]
         sin = self.sin_cached[token_positions]
         x1 = x[..., 0::2]
         x2 = x[..., 1::2]
@@ -58,6 +61,8 @@ class RotaryPositionalEmbedding(nn.Module):
 
 
 class MultiheadSelfAttention(nn.Module):
+    """Causal multi-head self-attention：Q/K/V 投影 → 拆头 → RoPE(Q,K) → causal SDPA → 合并 → output 投影。"""
+
     def __init__(
         self,
         d_model: int,
@@ -84,9 +89,7 @@ class MultiheadSelfAttention(nn.Module):
         token_positions: Tensor | None = None,
     ) -> Tensor:
         B, S, _ = x.shape
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         q = rearrange(q, "b s (h d) -> b h s d", h=self.num_heads)
         k = rearrange(k, "b s (h d) -> b h s d", h=self.num_heads)
         v = rearrange(v, "b s (h d) -> b h s d", h=self.num_heads)
@@ -94,6 +97,7 @@ class MultiheadSelfAttention(nn.Module):
             token_positions = torch.arange(S, device=x.device).unsqueeze(0).expand(B, -1)
         q = self.rope(q, token_positions)
         k = self.rope(k, token_positions)
+        # 下三角 causal mask：位置 i 只能看 0..i
         causal = torch.tril(torch.ones(S, S, device=x.device, dtype=torch.bool)).unsqueeze(0).unsqueeze(0)
         causal = causal.expand(B, self.num_heads, S, S)
         out = scaled_dot_product_attention(q, k, v, mask=causal)

@@ -1,4 +1,5 @@
-# SwiGLU FFN, Transformer block, full Transformer LM.
+# SwiGLU FFN、Transformer block、完整 Transformer LM。
+# 对应文档: docs/transformer.md
 from __future__ import annotations
 
 import math
@@ -13,6 +14,8 @@ from .nn import Embedding, Linear, RMSNorm, silu
 
 
 class SwiGLU(nn.Module):
+    """门控前馈：FFN(x) = W2( SiLU(W1 x) ⊙ W3 x )。d_ff 默认约 8/3*d_model 且为 64 的倍数。"""
+
     def __init__(
         self,
         d_model: int,
@@ -33,6 +36,8 @@ class SwiGLU(nn.Module):
 
 
 class TransformerBlock(nn.Module):
+    """Pre-norm 块：x + Attn(RMSNorm(x))，再 x + FFN(RMSNorm(x))。"""
+
     def __init__(
         self,
         d_model: int,
@@ -56,6 +61,8 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerLM(nn.Module):
+    """Decoder-only LM：embedding → N 个 TransformerBlock（带 RoPE）→ final RMSNorm → lm_head → logits。"""
+
     def __init__(
         self,
         vocab_size: int,

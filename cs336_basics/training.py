@@ -1,4 +1,5 @@
-# Data loading and checkpointing.
+# 数据加载与 checkpoint 保存/加载。
+# 对应文档: docs/training.md
 from __future__ import annotations
 
 import os
@@ -16,7 +17,7 @@ def get_batch(
     context_length: int,
     device: str,
 ) -> tuple[Tensor, Tensor]:
-    """Sample (input, target) batches from a 1D array of token IDs."""
+    """从一维 token ID 数组中随机采样 batch：x 为输入序列，y 为对应下一个 token（右移 1）。"""
     n = len(dataset)
     if n < context_length + 1:
         raise ValueError("Dataset too short for context_length")
@@ -35,6 +36,7 @@ def save_checkpoint(
     iteration: int,
     out: str | os.PathLike | BinaryIO | IO[bytes],
 ) -> None:
+    """将 model、optimizer 的 state_dict 与当前 iteration 写入 out（文件路径或文件对象）。"""
     state = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -48,6 +50,7 @@ def load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
 ) -> int:
+    """从 src 加载 checkpoint，恢复 model 与 optimizer，返回保存的 iteration。"""
     state = torch.load(src, map_location="cpu")
     model.load_state_dict(state["model"])
     optimizer.load_state_dict(state["optimizer"])
