@@ -1,4 +1,4 @@
-# Byte-pair encoding: training and tokenizer (encode/decode).
+# Byte-pair encoding (BPE): training and tokenizer (encode/decode).
 # 对应文档: docs/bpe.md
 from __future__ import annotations
 
@@ -62,6 +62,8 @@ def train_bpe(
             id_word_counts[ids] += count
 
     merges: list[tuple[bytes, bytes]] = []
+    target_merges = vocab_size - len(vocab)
+    last_log = 0
 
     while len(vocab) < vocab_size:
         # 统计所有“相邻 id 对”的出现次数（按词加权）
@@ -89,6 +91,12 @@ def train_bpe(
         new_id = next_id
         next_id += 1
         vocab[new_id] = new_bytes
+
+        # 进度：每 500 次 merge 打印一次
+        n_merge = len(merges)
+        if n_merge - last_log >= 500 or n_merge == target_merges:
+            print(f"  BPE merges: {n_merge}/{target_merges}", flush=True)
+            last_log = n_merge
 
         # 在所有词中，把连续的 (left_id, right_id) 替换成 new_id，得到新的词表表示
         new_id_word_counts: Counter[tuple[int, ...]] = Counter()
@@ -146,6 +154,17 @@ class Tokenizer:
                 new_id = max(self._vocab.keys(), default=-1) + 1
                 self._vocab[new_id] = b
                 self._bytes_to_id[b] = new_id
+        # 编码加速：预计算 (left_id, right_id, new_id)，避免在热路径里做 bytes 拼接和查表
+        self._merge_rules: list[tuple[int, int, int]] = []
+        for left, right in self._merges:
+            merged = left + right
+            self._merge_rules.append((
+                self._bytes_to_id[left],
+                self._bytes_to_id[right],
+                self._bytes_to_id[merged],
+            ))
+        # 单字节 -> id 列表，编码时直接索引，避免 per-byte 字典查找
+        self._single_byte_id: list[int] = [self._bytes_to_id[bytes([i])] for i in range(256)]
 
     @classmethod
     def from_files(
@@ -188,19 +207,25 @@ class Tokenizer:
         return result
 
     def _bpe_encode_bytes(self, b: bytes) -> list[int]:
-        """对单个预分词单元（一段 bytes）应用 BPE：按 merges 顺序合并，再查 id。"""
+        """对单个预分词单元应用 BPE：按merge顺序逐个应用，每轮线性扫描。"""
         if not b:
             return []
-        # 初始为单字节列表，然后按 merges 顺序从左到右合并
-        tokens: list[bytes] = [bytes([x]) for x in b]
-        for left, right in self._merges:
+        tokens: list[int] = [self._single_byte_id[x] for x in b]
+
+        for left_id, right_id, new_id in self._merge_rules:
+            if len(tokens) < 2:
+                break
             i = 0
-            while i < len(tokens) - 1:
-                if tokens[i] == left and tokens[i + 1] == right:
-                    tokens = tokens[:i] + [left + right] + tokens[i + 2 :]
+            new_tokens: list[int] = []
+            while i < len(tokens):
+                if i < len(tokens) - 1 and tokens[i] == left_id and tokens[i + 1] == right_id:
+                    new_tokens.append(new_id)
+                    i += 2
                 else:
+                    new_tokens.append(tokens[i])
                     i += 1
-        return [self._bytes_to_id[t] for t in tokens]
+            tokens = new_tokens
+        return tokens
 
     def encode_iterable(self, iterable: Iterator[str]) -> Iterator[int]:
         """流式编码：从字符串迭代器（如文件）逐块读入，按块/行产出 token id，适合大文件省内存。"""
@@ -286,12 +311,17 @@ def _load_merges_from_file(
             parts = line.split(" ", 1)
             if len(parts) == 2:
                 a, b = parts
-                # 本仓库格式：每行 "left_byte0,left_byte1 right_byte0,right_byte1"
+                # 本仓库格式：每行 "left_byte0,left_byte1 right_byte0,right_byte1" 或单字节 "32 116"
                 if "," in a or "," in b:
                     left = bytes(int(x) for x in a.split(","))
                     right = bytes(int(x) for x in b.split(","))
                     merges.append((left, right))
                 else:
-                    # GPT-2 style: tokens as in vocab (single chars). Decode via UTF-8.
-                    merges.append((a.encode("utf-8"), b.encode("utf-8")))
+                    try:
+                        left = bytes([int(a)])
+                        right = bytes([int(b)])
+                        merges.append((left, right))
+                    except ValueError:
+                        # GPT-2 style: tokens as in vocab (single chars). Decode via UTF-8.
+                        merges.append((a.encode("utf-8"), b.encode("utf-8")))
     return merges
